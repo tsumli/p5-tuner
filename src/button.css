@@ -1,0 +1,186 @@
+body {
+    font: 14px "Century Gothic", Futura, sans-serif;
+    margin: 20px;
+    background-color: #222222;
+  }
+  
+  ol, ul {
+    padding-left: 30px;
+  }
+  
+  .title{
+    font: 30px sans-serif;
+    font-weight: bold;
+    margin: 24px;
+    text-align: center;
+    color: white;
+  }
+  
+  h1:first-letter {
+    color: #668ad8;
+  }
+  
+  .sounding_note{
+    font: 24px sans-serif;
+    font-weight: bold;
+    margin: 20px;
+    text-align: center;
+    color: white;
+  }
+  
+  
+  .note_buttons {
+    text-align: center;
+  }
+  
+  .note_button {
+    display: inline-block;
+    text-decoration: none;
+    color: white;
+    width: 60px;
+    height: 60px;
+    line-height: 60px;
+    border-radius: 50%;
+    border: solid 2px #668ad8;
+    text-align: center;
+    overflow: hidden;
+    font-weight: bold;
+    transition: .4s;
+    margin: 10px;
+  }
+  
+  
+  .note_button:hover {
+    background: #333333;
+    border-style: dashed;
+    animation: rotate-anime 3s linear infinite;
+  }
+  
+  @keyframes rotate-anime {
+    0%  {transform: rotate(0);}
+    100%  {transform: rotate(-360deg);}
+  }
+  
+  .control_buttons{
+    text-align: center;
+  }
+  
+  .herz_button{
+    display: inline-block;
+    padding: 0.1em 0.5em;
+    text-decoration: none;
+    color: white;
+    border: solid 2px #668ad8;
+    border-radius: 3px;
+    transition: .4s;
+    margin:10px;
+    width: 80px;
+    height: 40px;
+    line-height: 40px;
+    text-align: center;
+  }
+  
+  .herz_button:hover {
+    background: #333333;
+  }
+  
+  .oct_button{
+    display: inline-block;
+    padding: 0.1em 0.5em;
+    text-decoration: none;
+    color: white;
+    border: solid 2px #668ad8;
+    border-radius: 3px;
+    transition: .4s;
+    margin:10px;
+    width: 80px;
+    height: 40px;
+    line-height: 40px;
+    text-align: center;
+  }
+  
+  .oct_button:hover {
+    background: #333333;
+  }
+  
+  
+  
+  .stop_button {
+    display: inline-block;
+    text-decoration: none;
+    color: white;
+    width: 60px;
+    height: 60px;
+    line-height: 60px;
+    border-radius: 50%;
+    border: solid 2px #a52a2a;
+    text-align: center;
+    overflow: hidden;
+    font-weight: bold;
+    transition: .4s;
+    margin: 10px;
+  }
+  
+  .stop_button:hover {
+    background: #333333;
+  }
+  
+  .toggle {
+    display: inline-block;
+    text-decoration: none;
+    color: white;
+    width: 60px;
+    height: 60px;
+    line-height: 60px;
+    border-radius: 50%;
+    border: solid 2px #668ad8;
+    text-align: center;
+    overflow: hidden;
+    font-weight: bold;
+    transition: .4s;
+    margin: 10px;
+  }
+  
+  
+  .uptriangle{
+    width: 0;
+    height: 0;
+    border-right: 18px solid transparent;
+    border-bottom: 30px solid #668ad8;
+    border-left: 18px solid transparent;
+    margin: 10px;
+  }
+  
+  .downtriangle{
+    width: 0;
+    height: 0;
+    border-top: 30px solid #668ad8;
+    border-right: 18px solid transparent;
+    border-left: 18px solid transparent;
+    margin: 10px;
+  }
+  
+  .herz_name{
+    font: 16px sans-serif;
+    font-weight: bold;
+    text-align: center;
+    line-height:45px;
+    color: white;
+  }
+  
+  .herz_buttons{
+      display: flex;
+      justify-content: space-between;
+  }
+  
+  .oct_buttons{
+    display: flex;
+    justify-content: space-between;
+  }
+  
+  .app_text {
+    font: 16px sans-serif;
+    text-align: center;
+    color:white;
+  }
+  
