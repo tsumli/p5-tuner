@@ -24,7 +24,7 @@ struct VoiceParam {
 struct Shared {
     table: ArcSwap<Vec<f32>>,
     voices: [VoiceParam; MAX_VOICES],
-    master_gain_bits: AtomicU32, // 例: 0.2 など
+    master_gain_bits: AtomicU32,
 }
 
 pub struct AudioEngine {
@@ -40,7 +40,6 @@ impl AudioEngine {
             .ok_or_else(|| anyhow::anyhow!("No output device"))?;
         let supported = device.default_output_config()?;
 
-        // 初期テーブル（サイン波）
         let n = 2048usize;
         let mut init = vec![0.0f32; n];
         for i in 0..n {
@@ -58,7 +57,6 @@ impl AudioEngine {
         let sample_rate = config.sample_rate as f32;
         let channels = config.channels as usize;
 
-        // 音声スレッド内状態（各voiceのphase/amp）
         let mut phase = [0.0f32; MAX_VOICES];
         let mut amp = [0.0f32; MAX_VOICES];
 
@@ -123,7 +121,6 @@ impl AudioEngine {
             .store(f32_to_u32_bits(gain.clamp(0.0, 1.0)), Ordering::Relaxed);
     }
 
-    /// 和音を一発でセット（voices[0..k] を鳴らして、残りは止める）
     pub fn set_chord(&self, freqs: Vec<f32>) {
         let k = freqs.len().min(MAX_VOICES);
         for i in 0..k {
@@ -138,7 +135,6 @@ impl AudioEngine {
         }
     }
 
-    /// すべての音を止める
     pub fn all_notes_off(&self) {
         for v in &self.shared.voices {
             v.gate.store(false, Ordering::Relaxed);
@@ -147,12 +143,6 @@ impl AudioEngine {
 }
 
 // ---- audio render ----
-
-fn soft_clip(x: f32) -> f32 {
-    // 速いソフトクリップ（tanhの近似っぽいやつ）
-    // x / (1 + |x|) は軽くて効く
-    x / (1.0 + x.abs())
-}
 
 fn render_core(
     out_len_frames: usize,
@@ -174,23 +164,38 @@ fn render_core(
 
     let gain = u32_bits_to_f32(shared.master_gain_bits.load(Ordering::Relaxed));
 
-    // envelope追従速度（クリック抑制。ADSRは後で）
-    let a = 0.001;
+    let active_count: usize = shared
+        .voices
+        .iter()
+        .filter(|v| v.gate.load(Ordering::Relaxed))
+        .count();
+
+    let norm = if active_count > 0 {
+        1.0 / (active_count as f32).sqrt()
+    } else {
+        1.0
+    };
+
+    let attack_coef = 0.002;
+    let release_coef = 0.0005;
 
     for frame in 0..out_len_frames {
         let mut sum = 0.0f32;
-        let mut active = 0u32;
 
         for i in 0..MAX_VOICES {
             let on = shared.voices[i].gate.load(Ordering::Relaxed);
             let target = if on { 1.0 } else { 0.0 };
-            amp[i] += (target - amp[i]) * a;
 
-            if amp[i] < 1e-5 {
+            let coef = if target > amp[i] {
+                attack_coef
+            } else {
+                release_coef
+            };
+            amp[i] += (target - amp[i]) * coef;
+
+            if amp[i] < 1e-6 {
                 continue;
             }
-
-            active += 1;
 
             let freq = u32_bits_to_f32(shared.voices[i].freq_bits.load(Ordering::Relaxed));
             let phase_inc = freq / sample_rate;
@@ -208,13 +213,7 @@ fn render_core(
             sum += sample;
         }
 
-        // ボイス数で軽く正規化（音割れしにくく）
-        let norm = if active > 0 {
-            1.0 / (active as f32).sqrt()
-        } else {
-            0.0
-        };
-        let out_sample = soft_clip(sum * norm * gain);
+        let out_sample = (sum * norm * gain).clamp(-1.0, 1.0);
 
         for ch in 0..channels {
             write_sample(frame * channels + ch, out_sample);
