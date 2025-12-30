@@ -13,10 +13,18 @@ fn u32_bits_to_f32(x: u32) -> f32 {
     f32::from_bits(x)
 }
 
-struct Shared {
-    table: ArcSwap<Vec<f32>>,
+const MAX_VOICES: usize = 16;
+
+#[derive(Default)]
+struct VoiceParam {
     freq_bits: AtomicU32,
     gate: AtomicBool,
+}
+
+struct Shared {
+    table: ArcSwap<Vec<f32>>,
+    voices: [VoiceParam; MAX_VOICES],
+    master_gain_bits: AtomicU32, // 例: 0.2 など
 }
 
 pub struct AudioEngine {
@@ -42,17 +50,17 @@ impl AudioEngine {
 
         let shared = Arc::new(Shared {
             table: ArcSwap::from_pointee(init),
-            freq_bits: AtomicU32::new(f32_to_u32_bits(440.0)),
-            gate: AtomicBool::new(false),
+            voices: std::array::from_fn(|_| VoiceParam::default()),
+            master_gain_bits: AtomicU32::new(f32_to_u32_bits(0.2)),
         });
 
         let config: cpal::StreamConfig = supported.clone().into();
         let sample_rate = config.sample_rate as f32;
         let channels = config.channels as usize;
 
-        // 音声スレッド内状態（unsafe不要）
-        let mut phase: f32 = 0.0;
-        let mut amp: f32 = 0.0;
+        // 音声スレッド内状態（各voiceのphase/amp）
+        let mut phase = [0.0f32; MAX_VOICES];
+        let mut amp = [0.0f32; MAX_VOICES];
 
         let shared_cl = Arc::clone(&shared);
 
@@ -65,12 +73,10 @@ impl AudioEngine {
                 move |err| eprintln!("audio err: {err}"),
                 None,
             )?,
-
             cpal::SampleFormat::I16 => {
-                // 別クロージャを作るので、Arc をもう1回 clone する
                 let shared_cl = Arc::clone(&shared);
-                let mut phase: f32 = 0.0;
-                let mut amp: f32 = 0.0;
+                let mut phase = [0.0f32; MAX_VOICES];
+                let mut amp = [0.0f32; MAX_VOICES];
                 device.build_output_stream(
                     &config,
                     move |out: &mut [i16], _| {
@@ -80,11 +86,10 @@ impl AudioEngine {
                     None,
                 )?
             }
-
             cpal::SampleFormat::U16 => {
                 let shared_cl = Arc::clone(&shared);
-                let mut phase: f32 = 0.0;
-                let mut amp: f32 = 0.0;
+                let mut phase = [0.0f32; MAX_VOICES];
+                let mut amp = [0.0f32; MAX_VOICES];
                 device.build_output_stream(
                     &config,
                     move |out: &mut [u16], _| {
@@ -94,12 +99,10 @@ impl AudioEngine {
                     None,
                 )?
             }
-
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),
         };
 
         stream.play()?;
-
         Ok(Self {
             shared,
             _stream: stream,
@@ -114,29 +117,50 @@ impl AudioEngine {
         self.shared.table.store(Arc::new(s));
     }
 
-    pub fn note_on(&self, freq: f32) {
+    pub fn set_master_gain(&self, gain: f32) {
         self.shared
-            .freq_bits
-            .store(f32_to_u32_bits(freq.max(1.0)), Ordering::Relaxed);
-        self.shared.gate.store(true, Ordering::Relaxed);
+            .master_gain_bits
+            .store(f32_to_u32_bits(gain.clamp(0.0, 1.0)), Ordering::Relaxed);
     }
 
-    pub fn note_off(&self) {
-        self.shared.gate.store(false, Ordering::Relaxed);
+    /// 和音を一発でセット（voices[0..k] を鳴らして、残りは止める）
+    pub fn set_chord(&self, freqs: Vec<f32>) {
+        let k = freqs.len().min(MAX_VOICES);
+        for i in 0..k {
+            let f = freqs[i].max(1.0);
+            self.shared.voices[i]
+                .freq_bits
+                .store(f32_to_u32_bits(f), Ordering::Relaxed);
+            self.shared.voices[i].gate.store(true, Ordering::Relaxed);
+        }
+        for i in k..MAX_VOICES {
+            self.shared.voices[i].gate.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// すべての音を止める
+    pub fn all_notes_off(&self) {
+        for v in &self.shared.voices {
+            v.gate.store(false, Ordering::Relaxed);
+        }
     }
 }
 
-// ======================
-// renderer（音声スレッド）
-// ======================
+// ---- audio render ----
+
+fn soft_clip(x: f32) -> f32 {
+    // 速いソフトクリップ（tanhの近似っぽいやつ）
+    // x / (1 + |x|) は軽くて効く
+    x / (1.0 + x.abs())
+}
 
 fn render_core(
     out_len_frames: usize,
     channels: usize,
     sample_rate: f32,
     shared: &Arc<Shared>,
-    phase: &mut f32,
-    amp: &mut f32,
+    phase: &mut [f32; MAX_VOICES],
+    amp: &mut [f32; MAX_VOICES],
     mut write_sample: impl FnMut(usize, f32),
 ) {
     let tab = shared.table.load();
@@ -146,33 +170,54 @@ fn render_core(
         }
         return;
     }
-
     let n = tab.len() as f32;
 
-    let freq = u32_bits_to_f32(shared.freq_bits.load(Ordering::Relaxed));
-    let on = shared.gate.load(Ordering::Relaxed);
+    let gain = u32_bits_to_f32(shared.master_gain_bits.load(Ordering::Relaxed));
 
-    // 超簡易クリック抑制（後でADSRへ）
-    let target = if on { 0.2 } else { 0.0 };
+    // envelope追従速度（クリック抑制。ADSRは後で）
     let a = 0.001;
-    let phase_inc = freq / sample_rate;
 
     for frame in 0..out_len_frames {
-        *amp += (target - *amp) * a;
+        let mut sum = 0.0f32;
+        let mut active = 0u32;
 
-        *phase = (*phase + phase_inc) % 1.0;
+        for i in 0..MAX_VOICES {
+            let on = shared.voices[i].gate.load(Ordering::Relaxed);
+            let target = if on { 1.0 } else { 0.0 };
+            amp[i] += (target - amp[i]) * a;
 
-        let pos = *phase * n;
-        let i0 = pos.floor() as usize;
-        let i1 = (i0 + 1) % tab.len();
-        let frac = pos - i0 as f32;
+            if amp[i] < 1e-5 {
+                continue;
+            }
 
-        let s0 = tab[i0];
-        let s1 = tab[i1];
-        let sample = (s0 + (s1 - s0) * frac) * *amp;
+            active += 1;
+
+            let freq = u32_bits_to_f32(shared.voices[i].freq_bits.load(Ordering::Relaxed));
+            let phase_inc = freq / sample_rate;
+            phase[i] = (phase[i] + phase_inc) % 1.0;
+
+            let pos = phase[i] * n;
+            let i0 = pos.floor() as usize;
+            let i1 = (i0 + 1) % tab.len();
+            let frac = pos - i0 as f32;
+
+            let s0 = tab[i0];
+            let s1 = tab[i1];
+            let sample = (s0 + (s1 - s0) * frac) * amp[i];
+
+            sum += sample;
+        }
+
+        // ボイス数で軽く正規化（音割れしにくく）
+        let norm = if active > 0 {
+            1.0 / (active as f32).sqrt()
+        } else {
+            0.0
+        };
+        let out_sample = soft_clip(sum * norm * gain);
 
         for ch in 0..channels {
-            write_sample(frame * channels + ch, sample);
+            write_sample(frame * channels + ch, out_sample);
         }
     }
 }
@@ -182,8 +227,8 @@ fn render_f32(
     channels: usize,
     sample_rate: f32,
     shared: &Arc<Shared>,
-    phase: &mut f32,
-    amp: &mut f32,
+    phase: &mut [f32; MAX_VOICES],
+    amp: &mut [f32; MAX_VOICES],
 ) {
     let frames = out.len() / channels;
     render_core(frames, channels, sample_rate, shared, phase, amp, |i, s| {
@@ -196,8 +241,8 @@ fn render_i16(
     channels: usize,
     sample_rate: f32,
     shared: &Arc<Shared>,
-    phase: &mut f32,
-    amp: &mut f32,
+    phase: &mut [f32; MAX_VOICES],
+    amp: &mut [f32; MAX_VOICES],
 ) {
     let frames = out.len() / channels;
     render_core(frames, channels, sample_rate, shared, phase, amp, |i, s| {
@@ -211,8 +256,8 @@ fn render_u16(
     channels: usize,
     sample_rate: f32,
     shared: &Arc<Shared>,
-    phase: &mut f32,
-    amp: &mut f32,
+    phase: &mut [f32; MAX_VOICES],
+    amp: &mut [f32; MAX_VOICES],
 ) {
     let frames = out.len() / channels;
     render_core(frames, channels, sample_rate, shared, phase, amp, |i, s| {
